@@ -19,3 +19,7 @@
 .entry-title{font-size:14px;color:#7d222b}
 .entry-content{line-height:1.9}
 @media(max-width:650px){.panel-head .buttons{width:100%}.panel-head .buttons button{flex:1 1 42%}}
+
+/* V4 · 新建草稿与提取结果 */
+.draft-tip{padding:14px 16px;border:1px solid #eac1bb;background:#fff1ed;border-radius:10px;color:#8e1a26;line-height:1.8;font-size:13px;margin:12px 0}
+.parse-result{padding:12px 15px;border-left:4px solid #b51f31;background:#fff6ef;color:#75202a;border-radius:7px;font-size:13px;margin:10px 0 16px;line-height:1.8}
