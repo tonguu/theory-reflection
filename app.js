@@ -37,10 +37,40 @@ function loginView(logged){$('loginCard').classList.toggle('hidden',logged);$('d
 async function verifyAdmin(){try{check();const {data:{user},error:e1}=await sb.auth.getUser();if(e1)throw e1;if(!user){loginView(false);return}const {data,error}=await sb.from('admin_users').select('user_id').eq('user_id',user.id).maybeSingle();if(error)throw error;if(!data){loginView(false);notice('当前账号不在授权管理员名单中',true);return}loginView(true);await loadActivities()}catch(e){loginView(false);notice(err(e),true)}}
 $('loginForm').onsubmit=async e=>{e.preventDefault();try{check();let f=Object.fromEntries(new FormData(e.target));let {error}=await sb.auth.signInWithPassword(f);if(error)throw error;await verifyAdmin()}catch(ex){notice(err(ex),true)}};
 $('logoutBtn').onclick=async()=>{await sb.auth.signOut();loginView(false);notice('已退出登录')};
-async function loadActivities(id){let {data,error}=await sb.from('activities').select('*').order('created_at',{ascending:false});if(error)throw error;activities=data||[];let sel=$('activitySelect'),want=id||sel.value||activities.find(a=>a.is_active)?.id||activities[0]?.id;sel.replaceChildren();for(let a of activities){let o=document.createElement('option');o.value=a.id;o.textContent=`${a.is_active?'● ':''}${a.study_month||'?'}月 ${a.topic}`;sel.append(o)}if(want&&activities.find(a=>a.id===want))sel.value=want;await selectActivity()}
+async function loadActivities(id){
+ const {data,error}=await sb.from('activities').select('*').order('created_at',{ascending:false});
+ if(error)throw error;
+ activities=data||[];
+ const sel=$('activitySelect');
+ const wanted=id||sel.value||activities.find(a=>a.is_active)?.id||activities[0]?.id;
+ sel.replaceChildren();
+ for(const a of activities){
+  const o=document.createElement('option');o.value=a.id;
+  o.textContent=`${a.is_active?'● 正在征集 · ':'已关闭 · '}${a.study_month||'?'}月 · ${a.topic}`;
+  sel.append(o);
+ }
+ if(wanted&&activities.some(a=>a.id===wanted))sel.value=wanted;
+ await selectActivity();
+}
 $('activitySelect').onchange=selectActivity;
 function formatBeijingInput(ts){if(!ts)return '';return new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(ts)).replace(' ','T')}
-async function selectActivity(){activity=activities.find(a=>a.id===$('activitySelect').value)||null;let form=$('activityForm');if(!activity){form.reset();submissions=[];renderList();return}for(let name of ['topic','college','activity_date','location','organizer','attendees','tweet','tweet_url','overview','study_month','material_title','material_url','meeting_format']){if(form.elements[name])form.elements[name].value=activity[name]??''}form.elements.deadline_local.value=formatBeijingInput(activity.deadline);form.elements.is_active.checked=!!activity.is_active;$('parseText').value=activity.notice_text||'';await loadSubmissions()}
+async function selectActivity(){
+ activity=activities.find(a=>a.id===$('activitySelect').value)||null;
+ const form=$('activityForm');
+ submissions=[];
+ renderList();
+ $('activitySubmissionHint').textContent=activity
+  ? `当前筛选：${activity.study_month||'?'}月 · ${activity.topic}。只显示和导出此活动的投稿。`
+  : '尚未选中学习活动';
+ if(!activity){form.reset();$('parseText').value='';return}
+ for(const name of ['topic','college','activity_date','location','organizer','attendees','tweet','tweet_url','overview','study_month','material_title','material_url','meeting_format']){
+  if(form.elements[name])form.elements[name].value=activity[name]??'';
+ }
+ form.elements.deadline_local.value=formatBeijingInput(activity.deadline);
+ form.elements.is_active.checked=!!activity.is_active;
+ $('parseText').value=activity.notice_text||'';
+ await loadSubmissions();
+}
 function parseNotice(raw){let s=clean(raw).replace(/\\\s*\n/g,'\n').replace(/https\\:/g,'https:');let out={};
  const topic=s.match(/(?:现发布新一期理论学习主题|理论学习主题)\s*[：:]\s*\n?\s*([^\n\[\]【】]+)/);if(topic)out.topic=clean(topic[1]);
  const material=s.match(/(?:学习内容|学习材料)\s*[：:]\s*(?:《([^》]+)》|([^\n]+))/);if(material)out.material_title=clean(material[1]||material[2]);
@@ -55,26 +85,76 @@ $('activityForm').onsubmit=async e=>{e.preventDefault();if(!activity)return;let 
  try{if(!(vals.study_month>=1&&vals.study_month<=12))throw Error('请选择1～12月');if(vals.is_active){let old=activities.filter(a=>a.is_active&&a.id!==activity.id).map(a=>a.id);if(old.length){let r=await sb.from('activities').update({is_active:false}).in('id',old);if(r.error)throw r.error}}
  const {error}=await sb.from('activities').update(vals).eq('id',activity.id);if(error)throw error;await loadActivities(activity.id);await loadPublic();notice('活动设置保存成功')}catch(ex){notice('保存失败：'+err(ex),true)}};
 
+// 删除已发布活动前先核对数据库归属投稿数量；删除会触发 submissions 外键的 ON DELETE CASCADE。
+$('closeActivityBtn').onclick=async()=>{
+ if(!activity)return notice('请先选择要关闭的活动',true);
+ const a=activity;
+ if(!a.is_active)return notice('该活动已处于关闭状态');
+ if(!confirm(`关闭“${a.study_month||'?'}月 · ${a.topic}”吗？关闭后不能继续提交或修改，已提交心得保留。`))return;
+ const {error}=await sb.from('activities').update({is_active:false}).eq('id',a.id);
+ if(error)return notice('关闭失败：'+err(error),true);
+ await loadActivities(a.id);await loadPublic();notice('已关闭活动，已有心得仍保留在该活动下。');
+};
+$('deleteActivityBtn').onclick=async()=>{
+ if(!activity)return notice('请先选择要删除的活动',true);
+ const a=activity;
+ let {count,error:e}=await sb.from('submissions').select('id',{head:true,count:'exact'}).eq('activity_id',a.id);
+ if(e)return notice('无法核查投稿数量：'+err(e),true);
+ count=count||0;
+ const label=`${a.study_month||'?'}月 · ${a.topic}`;
+ if(!confirm(`【高风险操作】确定永久删除“${label}”吗？\n该活动下 ${count} 条心得也将一并永久删除（包括已审核和待审核），且无法撤销。\n如只是暂时停止征集，请点击“关闭当前活动”。`))return;
+ const typed=prompt(`再次确认：请输入本活动的完整主题以删除 ${count} 条关联心得：\n${a.topic}`);
+ if(typed!==a.topic)return notice('主题未完全匹配，已取消删除。',true);
+ const {error}=await sb.from('activities').delete().eq('id',a.id);
+ if(error)return notice('删除失败：'+err(error),true);
+ await loadActivities();await loadPublic();notice(`已永久删除“${label}”及其 ${count} 条关联心得。`);
+};
+
 async function allRows(table,select,activityId,approvedOnly=false){let list=[],from=0;while(true){let query=sb.from(table).select(select).eq('activity_id',activityId).order('created_at',{ascending:true}).range(from,from+499);if(approvedOnly)query=query.eq('approved',true);let {data,error}=await query;if(error)throw error;list.push(...(data||[]));if(!data||data.length<500)break;from+=500;if(from>100000)throw Error('稿件过多，请分批导出')}return list}
-async function loadSubmissions(){if(!activity)return;try{submissions=await allRows('submissions','*',activity.id);renderList()}catch(e){notice('读取稿件失败：'+err(e),true)}}
+async function loadSubmissions(){if(!activity)return;const id=activity.id;try{const rows=await allRows('submissions','*',id);if(activity?.id!==id)return;submissions=rows;renderList()}catch(e){notice('读取稿件失败：'+err(e),true)}}
 $('refreshBtn').onclick=loadSubmissions;$('statusFilter').onchange=renderList;$('searchBox').oninput=renderList;
 function make(tag,cls,txt){let el=document.createElement(tag);if(cls)el.className=cls;if(txt!==undefined)el.textContent=txt;return el}
-function renderList(){let wrap=$('submissionList');wrap.replaceChildren();$('totalStat').textContent=submissions.length;$('approvedStat').textContent=submissions.filter(x=>x.approved).length;$('pendingStat').textContent=submissions.filter(x=>!x.approved).length;let f=$('statusFilter').value,q=clean($('searchBox').value).toLowerCase();let rows=submissions.filter(x=>(f==='all'||(f==='approved'?x.approved:!x.approved))&&[x.name,x.grade,x.content].some(v=>clean(v).toLowerCase().includes(q)));if(!rows.length){wrap.textContent='暂无符合条件的稿件';return}for(let x of rows){let box=make('article','entry');let h=make('h3','entry-title',`${x.name} · ${x.grade}级 · ${x.college} ${x.approved?'✓已审核':'待审核'}`);let p=make('p','entry-content',x.content);let action=make('div','entry-actions');let appr=make('button','ghost',x.approved?'取消审核':'审核通过');appr.onclick=()=>modify(x.id,{approved:!x.approved});let edit=make('button','ghost','编辑');edit.onclick=async()=>{let content=prompt('编辑心得',x.content);if(content!==null){if(length(content)<100||length(content)>3000){notice('字数需100～3000',true);return}await modify(x.id,{content:clean(content),approved:false})}};let del=make('button','ghost','删除');del.onclick=async()=>{if(!confirm(`确定永久删除${x.name}的投稿吗？`))return;let {error}=await sb.from('submissions').delete().eq('id',x.id);if(error)notice(err(error),true);else await loadSubmissions()};action.append(appr,edit,del);box.append(h,p,action);wrap.append(box)}}
+function renderList(){
+ const wrap=$('submissionList');wrap.replaceChildren();
+ $('totalStat').textContent=submissions.length;
+ $('approvedStat').textContent=submissions.filter(x=>x.approved).length;
+ $('pendingStat').textContent=submissions.filter(x=>!x.approved).length;
+ const f=$('statusFilter').value,q=clean($('searchBox').value).toLowerCase();
+ const rows=submissions.filter(x=>(f==='all'||(f==='approved'?x.approved:!x.approved))&&[x.name,x.grade,x.content].some(v=>clean(v).toLowerCase().includes(q)));
+ if(!rows.length){wrap.textContent='此活动暂无符合条件的稿件（其他活动投稿不会显示在这里）';return}
+ for(const x of rows){
+  const box=make('article','entry');
+  const h=make('h3','entry-title',`${x.name} · ${x.grade}级 · ${x.college} · ${activity?.study_month||'?'}月 ${activity?.topic} · ${x.approved?'✓已审核':'待审核'}`);
+  const p=make('p','entry-content',x.content);
+  const actions=make('div','entry-actions');
+  const approve=make('button','ghost',x.approved?'取消审核':'审核通过');approve.onclick=()=>modify(x.id,{approved:!x.approved});
+  const edit=make('button','ghost','编辑');edit.onclick=async()=>{const content=prompt('编辑心得',x.content);if(content!==null){if(length(content)<100||length(content)>3000)return notice('字数需100～3000',true);await modify(x.id,{content:clean(content),approved:false})}};
+  const move=make('button','ghost','调整主题');move.onclick=()=>moveSubmission(x);
+  const del=make('button','ghost','删除心得');del.onclick=async()=>{if(!confirm(`确定永久删除${x.name}的这份投稿吗？`))return;const {error}=await sb.from('submissions').delete().eq('id',x.id).eq('activity_id',activity.id);if(error)notice(err(error),true);else await loadSubmissions()};
+  actions.append(approve,edit,move,del);box.append(h,p,actions);wrap.append(box);
+ }
+}
+async function moveSubmission(x){
+ const available=activities.filter(a=>a.id!==x.activity_id);
+ if(!available.length)return notice('还没有其他学习主题，请先创建新活动',true);
+ const lines=available.map((a,i)=>`${i+1}. ${a.study_month||'?'}月 · ${a.topic}`);
+ const answer=prompt(`把“${x.name}”的心得调整到哪个主题？\n请输入序号：\n${lines.join('\n')}`);
+ if(answer===null)return;
+ const n=Number(answer);
+ if(!Number.isInteger(n)||n<1||n>available.length)return notice('无效序号，未修改',true);
+ const target=available[n-1];
+ if(!confirm(`确认把“${x.name}”的心得从“${activity.topic}”移动到“${target.topic}”吗？\n移动后将进入新活动的待审核列表，原活动导出不会再包含这份心得。`))return;
+ const {error}=await sb.from('submissions').update({activity_id:target.id,approved:false}).eq('id',x.id).eq('activity_id',activity.id);
+ if(error)return notice('调整失败（可能目标主题存在同姓名、同年级投稿）：'+err(error),true);
+ await loadSubmissions();notice(`调整成功，已转至“${target.study_month||'?'}月 · ${target.topic}”并重置为待审核。`);
+}
 async function modify(id,changes){let {error}=await sb.from('submissions').update(changes).eq('id',id);if(error)notice(err(error),true);else await loadSubmissions()}
 
 // --- 生成 PPT：保留上传封面的红色背景，标题/正文为可编辑的 PPT 文字框 ---
 function drawSlideCanvas(title,subtitle,date,body){let can=document.createElement('canvas');can.width=1600;can.height=900;let ctx=can.getContext('2d');return new Promise((resolve,reject)=>{let img=new Image();img.onload=()=>{ctx.drawImage(img,0,0,1600,900);ctx.fillStyle='#fff';ctx.textAlign='center';ctx.shadowColor='rgba(0,0,0,.25)';ctx.shadowBlur=8;ctx.font='bold 56px sans-serif';let t=clean(title);while(ctx.measureText(t).width>1430&&ctx.font.match(/\d+/)&&parseInt(ctx.font.match(/\d+/)[0])>30)ctx.font=`bold ${parseInt(ctx.font.match(/\d+/)[0])-2}px sans-serif`;ctx.fillText(t,800,300);ctx.font='38px sans-serif';ctx.fillText(subtitle,800,480);ctx.font='28px sans-serif';ctx.fillText(date,800,555);ctx.font='26px sans-serif';ctx.fillText('华南理工大学电子与信息学院研究生会',800,680);ctx.shadowBlur=0;resolve(can.toDataURL('image/png'))};img.onerror=()=>reject(Error('加载 PPT 红色背景图失败'));img.src='ppt-background.png'})}
 async function coverData(a){return drawSlideCanvas(a.topic,'理论学习会',a.activity_date||`${a.study_month||''}月理论学习`)}
-async function generatePpt(a){if(!window.pptxgen)throw Error('PPT 导出组件未加载，请检查网络');let ppt=new window.pptxgen();ppt.layout='LAYOUT_WIDE';ppt.author='电子与信息学院研究生会';ppt.subject=a.topic;let bg=await fileToDataURL(await (await fetch('ppt-background.png')).blob());const slide=(title,body,sub)=>{let s=ppt.addSlide();s.background={color:'AF020C'};s.addImage({data:bg,x:0,y:0,w:13.333,h:7.5});s.addShape(ppt.ShapeType.rect,{x:.75,y:.7,w:11.83,h:5.95,fill:{color:'670000',transparency:27},line:{color:'FFFFFF',transparency:100}});s.addText(title,{x:1.3,y:1.2,w:10.7,h:1.25,fontFace:'Microsoft YaHei',fontSize:title.length>30?28:37,bold:true,color:'FFFFFF',align:'center',breakLine:false,margin:0,fit:'shrink'});if(body)s.addText(body,{x:1.4,y:2.65,w:10.5,h:2.75,fontFace:'Microsoft YaHei',fontSize:20,color:'FFFFFF',breakLine:false,fit:'shrink',valign:'mid',align:'center',margin:.1});if(sub)s.addText(sub,{x:1.4,y:6.1,w:10.5,h:.65,fontFace:'Microsoft YaHei',fontSize:14,color:'FFFFFF',align:'center'});return s};
- slide(a.topic,'理论学习会',`${a.activity_date||`${a.study_month}月理论学习`} · 华南理工大学电子与信息学院研究生会`);
- slide('学习主题',a.topic,'学习材料：'+(a.material_title||'请查阅本期学习材料'));
- slide('学习内容与核心要点',clean(a.overview)||'请由管理员根据实际学习材料补充学习纪要和重点内容','资料链接：'+(a.material_url||'未提供'));
- slide('学习交流与心得分享','围绕学习主题，结合专业研究与实际工作开展交流研讨。','以下内容请结合实际开展情况调整');
- return ppt}
 function fn(a,ext){return `【${a.study_month||'X'}月理论学习】电子与信息学院理论学习报告.${ext}`}
 async function downloadBlob(blob,name){const file=new File([blob],name,{type:blob.type||'application/octet-stream'});if(navigator.canShare?.({files:[file]})&&navigator.share){try{await navigator.share({files:[file],title:name});return}catch(e){if(e.name==='AbortError')return}}const url=URL.createObjectURL(blob);let a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);notice('已请求浏览器保存文件；手机请检查浏览器下载记录或文件 App。')}
-$('exportPptBtn').onclick=async()=>{try{if(!activity)throw Error('尚未选择活动');let p=await generatePpt(activity);let data=await p.write({outputType:'blob'});await downloadBlob(data,`【${activity.study_month||'X'}月理论学习】电子与信息学院理论学习会.pptx`)}catch(e){notice('PPT导出失败：'+err(e),true)}};
-
 // 原 Word 模板，保留原生表格和版式；使用 OOXML 将 PPT 预览/实拍图嵌入「附图」位置。
 function imgDrawing(rid,idx,w=5100000,h=2870000){return `<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${w}" cy="${h}"/><wp:docPr id="${800+idx}" name="理论学习图${idx}"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${idx}" name="学习配图${idx}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${w}" cy="${h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`}
 async function addImagesToDocx(zip,images){let xml=zip.file('word/document.xml').asText(),rel=zip.file('word/_rels/document.xml.rels').asText(),ct=zip.file('[Content_Types].xml').asText();let output='';for(let i=0;i<images.length;i++){let rid='rIdTheoImg'+i,file='theory_img_'+i+'.png';let buf=images[i].split(',')[1];zip.file('word/media/'+file,buf,{base64:true});rel=rel.replace('</Relationships>',`<Relationship Id="${rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${file}"/></Relationships>`);output+=imgDrawing(rid,i,5100000,2870000)}
@@ -84,7 +164,7 @@ async function addImagesToDocx(zip,images){let xml=zip.file('word/document.xml')
  zip.file('word/document.xml',xml);zip.file('word/_rels/document.xml.rels',rel);zip.file('[Content_Types].xml',ct)}
 async function fileToDataURL(file){return new Promise((resolve,reject)=>{let r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file)})}
 function normalizePng(data){return new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>{let c=document.createElement('canvas');let max=1500,scale=Math.min(1,max/im.width,max/im.height);c.width=Math.round(im.width*scale);c.height=Math.round(im.height*scale);c.getContext('2d').drawImage(im,0,0,c.width,c.height);resolve(c.toDataURL('image/png'))};im.onerror=reject;im.src=data})}
-$('exportWordBtn').onclick=async()=>{let button=$('exportWordBtn');button.disabled=true;try{if(!activity)throw Error('尚未选择活动');if(!window.PizZip||!window.docxtemplater)throw Error('Word生成组件未加载');let rows=await allRows('submissions','*',activity.id,true);if(!rows.length)throw Error('没有已审核通过的心得');if(rows.length<3&&!confirm('当前审核通过少于3份，仍要导出吗？'))return;let response=await fetch('report-template.docx');if(!response.ok)throw Error('无法读取新版 Word 模板');let doc=new window.docxtemplater(new window.PizZip(await response.arrayBuffer()),{paragraphLoop:true,linebreaks:true,nullGetter:()=>''});doc.render({topic:activity.topic,date:activity.activity_date||'（待填写）',location:activity.location||'（待填写）',organizer:activity.organizer||'华南理工大学电子与信息学院研究生会',attendees:activity.attendees||'××',tweet:activity.tweet||'否',tweet_url:activity.tweet_url||'',overview:activity.overview||'（请补充实际学习会内容概要）',entries:rows.map((s,i)=>({number:i+1,college:s.college,grade:s.grade,name:s.name,content:s.content}))});let zip=doc.getZip();let images=[await coverData(activity),await drawSlideCanvas('学习主题',activity.topic,activity.material_title||'本期学习材料'),await drawSlideCanvas('学习内容概要',(activity.overview||'请由管理员补充学习要点').slice(0,46),activity.activity_date||'理论学习会')];for(let file of $('photoFiles').files){images.push(await normalizePng(await fileToDataURL(file)))}await addImagesToDocx(zip,images);let b=zip.generate({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',compression:'DEFLATE'});await downloadBlob(b,fn(activity,'docx'));}catch(e){console.error(e);notice('Word导出失败：'+err(e),true)}finally{button.disabled=false}};
+$('exportWordBtn').onclick=async()=>{let button=$('exportWordBtn');button.disabled=true;try{if(!activity)throw Error('尚未选择活动');if(!window.PizZip||!window.docxtemplater)throw Error('Word生成组件未加载');const selectedId=activity.id;let rows=await allRows('submissions','*',selectedId,true);if(activity?.id!==selectedId)throw Error('所选活动已变更，请重新导出');if(!rows.length)throw Error('没有已审核通过的心得');if(rows.length<3&&!confirm('当前审核通过少于3份，仍要导出吗？'))return;let response=await fetch('report-template.docx');if(!response.ok)throw Error('无法读取新版 Word 模板');let doc=new window.docxtemplater(new window.PizZip(await response.arrayBuffer()),{paragraphLoop:true,linebreaks:true,nullGetter:()=>''});doc.render({topic:activity.topic,date:activity.activity_date||'（待填写）',location:activity.location||'（待填写）',organizer:activity.organizer||'华南理工大学电子与信息学院研究生会',attendees:activity.attendees||'××',tweet:activity.tweet||'否',tweet_url:activity.tweet_url||'',overview:activity.overview||'（请补充实际学习会内容概要）',entries:rows.map((s,i)=>({number:i+1,college:s.college,grade:s.grade,name:s.name,content:s.content}))});let zip=doc.getZip();let images=[await coverData(activity),await drawSlideCanvas('学习主题',activity.topic,activity.material_title||'本期学习材料'),await drawSlideCanvas('学习内容概要',(activity.overview||'请由管理员补充学习要点').slice(0,46),activity.activity_date||'理论学习会')];for(let file of $('photoFiles').files){images.push(await normalizePng(await fileToDataURL(file)))}await addImagesToDocx(zip,images);let b=zip.generate({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',compression:'DEFLATE'});await downloadBlob(b,fn(activity,'docx'));}catch(e){console.error(e);notice('Word导出失败：'+err(e),true)}finally{button.disabled=false}};
 
 // 报道为基于真实数据的确定性草稿，不虚构参会人数、现场氛围和发言；可复制后再人工审核。
 function newsText(a,rows){let date=clean(a.activity_date)||'（学习日期待补充）',count=a.attendees?`共${a.attendees}人参加`:'参加人数待补充';let p=[`电子与信息学院研究生会开展${a.study_month||'本'}月理论学习会`,`${date}，电子与信息学院研究生会开展${a.study_month||'本'}月理论学习活动。${count}，围绕“${a.topic}”主题进行学习交流。`,a.overview?clean(a.overview):`本次理论学习围绕“${a.topic}”展开。学习内容为《${a.material_title||'本期学习材料'}》。具体学习过程和实际开展情况请由组织者核实补充。`];if(rows.length){let chunks=rows.slice(0,8).map(r=>{let excerpt=clean(r.content).replace(/\s+/g,' ');let first=excerpt.match(/^.{20,135}?[。！？]/)?.[0]||excerpt.slice(0,115);return `${r.grade}级研究生${r.name}在心得中写道：“${first}”`});p.push('学习心得交流中，'+chunks.join('；')+'。')}p.push('下一步，学院研究生会将持续组织理论学习，引导青年学生结合专业学习和科研实践深化认识、积极交流。');return p.join('\n\n')}
